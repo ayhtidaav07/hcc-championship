@@ -54,6 +54,25 @@ export interface BallLog {
   striker: string;
   nonStriker?: string | null; // recorded for ball-event persistence only
   bowler: string;
+  // Master engine resolution metadata
+  shotName?: string;
+  deliveryName?: string;
+  compatibility?: string;
+  hasStar?: boolean;
+  battingExecution?: number;
+  bowlingExecution?: number;
+  contactQuality?: "clean" | "controlled" | "mistimed" | "beaten";
+  trajectory?: "grounded" | "aerial" | "variable" | "reverse";
+  dismissalType?: "bowled" | "caught" | "stumped" | "lbw" | null;
+  dismissalFielder?: string | null;
+  lbwReview?: {
+    umpireValue: 1 | 2;
+    reviewerValue: 1 | 2;
+    isOut: boolean;
+  } | null;
+  isLegalBall?: boolean;
+  isExtra?: boolean;
+  extraType?: "wide" | "no_ball" | null;
 }
 
 export interface InningsState {
@@ -77,6 +96,8 @@ export interface InningsState {
   balls: BallLog[];
   outBatters: string[];
   yetToBat: string[];
+  bowlerStreak?: Record<string, { delivery: number; count: number }>;
+  fieldingPositions?: string[];
 }
 
 export interface GameState {

@@ -1,17 +1,29 @@
-import {
+import type {
   BallLog,
   GameState,
   InningsState,
+  Phase,
+  Side,
+  BatStats,
+  BowlStats,
+} from "./gameTypes";
+import {
   PHASE_OF_OVER,
   SQUARE_KEY,
-  Side,
   newBatStats,
   newBowlStats,
 } from "./gameTypes";
 import { TEAMS, getTeam, getEligibleBatters } from "./teams";
+import { resolveBallDelivery, type BallResolutionResult, type BallResolutionInput } from "./engine/resolution";
+import { DELIVERIES, SHOTS, getCompatibility } from "./engine/constants";
+import { buildFieldingSetup, type FieldingSetup } from "./engine/fielding";
 
 export const OVERS_PER_INNINGS = 15;
 export const MAX_ZEROS_PER_OVER = 3;
+
+export function getPlayerOvr(teamId: string | null | undefined, playerName: string): number {
+  return 70;
+}
 
 export function zerosUsedThisOver(inn: InningsState): number {
   const currentOver = inn.overNumber + 1;
@@ -116,6 +128,14 @@ export function setOpeners(s: GameState, striker: string, nonStriker: string): G
 
 export function setBowler(s: GameState, bowler: string): GameState {
   const inn = { ...s.innings[s.currentInnings]! };
+  // Streak is tracked per bowler; changing bowlers resets the streak for the previous bowler
+  const prevActive = inn.bowler ?? inn.prevBowler;
+  if (prevActive && prevActive !== bowler && inn.bowlerStreak) {
+    inn.bowlerStreak = {
+      ...inn.bowlerStreak,
+      [prevActive]: { delivery: 0, count: 0 },
+    };
+  }
   inn.bowler = bowler;
   if (!inn.bowlStats[bowler]) inn.bowlStats[bowler] = newBowlStats();
   inn.bowlStats[bowler].squaresConcededThisOver = 0;
@@ -184,7 +204,6 @@ export function lockInput(s: GameState, side: Side, value: number): GameState {
   if (s.phase !== "playing") return s;
   const inn = s.innings[s.currentInnings];
   if (!inn) return s;
-  if (side === inn.battingSide && value === 0 && zerosUsedThisOver(inn) >= MAX_ZEROS_PER_OVER) return s;
   if (side === "host") {
     if (s.hostLocked) return s;
     return { ...s, hostInput: value, hostLocked: true, lastActionAt: Date.now() };
@@ -194,28 +213,30 @@ export function lockInput(s: GameState, side: Side, value: number): GameState {
   }
 }
 
-// Compute ball outcome from bat/bowl values and phase.
+// Compute ball outcome from bat/bowl values using the central engine.
 export function computeOutcome(
   bat: number,
   bowl: number,
-  phase: "NORMAL" | "CRAZY",
-  batterZeroProtect: boolean,
-): { runs: number; out: boolean; isSquare: boolean } {
-  if (phase === "NORMAL") {
-    if (bat === bowl) return { runs: 0, out: true, isSquare: false };
-    return { runs: bat, out: false, isSquare: false };
-  }
-  // CRAZY
-  if (bat === bowl) {
-    return { runs: bat * bat, out: false, isSquare: bat > 0 };
-  }
-  if (!batterZeroProtect && Math.abs(bat - bowl) === 1) {
-    return { runs: 0, out: true, isSquare: false };
-  }
-  return { runs: bat, out: false, isSquare: false };
+  phase: "NORMAL" | "CRAZY" = "NORMAL",
+  batterZeroProtect: boolean = false,
+  overrides?: any,
+): { runs: number; out: boolean; isSquare: boolean; res: BallResolutionResult } {
+  const res = resolveBallDelivery({
+    bat,
+    bowl,
+    strikerName: "Batter",
+    bowlerName: "Bowler",
+    randomOverrides: overrides,
+  });
+  return {
+    runs: res.runs,
+    out: res.isWicket,
+    isSquare: res.isBoundary,
+    res,
+  };
 }
 
-export function resolveBall(s: GameState): GameState {
+export function resolveBall(s: GameState, randomOverrides?: any): GameState {
   if (!(s.hostLocked && s.awayLocked)) return s;
   const innIdx = s.currentInnings;
   const inn = { ...s.innings[innIdx]! };
@@ -223,81 +244,108 @@ export function resolveBall(s: GameState): GameState {
   const batInput = battingSide === "host" ? s.hostInput! : s.awayInput!;
   const bowlInput = battingSide === "host" ? s.awayInput! : s.hostInput!;
   const phase = PHASE_OF_OVER(inn.overNumber);
-  const overZerosUsed = zerosUsedThisOver(inn);
-
-  if (batInput === 0 && overZerosUsed >= MAX_ZEROS_PER_OVER) {
-    return {
-      ...s,
-      hostInput: battingSide === "host" ? null : s.hostInput,
-      awayInput: battingSide === "away" ? null : s.awayInput,
-      hostLocked: battingSide === "host" ? false : s.hostLocked,
-      awayLocked: battingSide === "away" ? false : s.awayLocked,
-      lastActionAt: Date.now(),
-    };
-  }
 
   const striker = inn.striker!;
   const bowler = inn.bowler!;
   const batterZerosUsed = inn.zeroCount[striker] ?? 0;
-  const batterZeroProtect = batInput === 0 && overZerosUsed < MAX_ZEROS_PER_OVER;
-  let outcome = computeOutcome(batInput, bowlInput, phase, batterZeroProtect);
 
+  const bowlerStreak = inn.bowlerStreak?.[bowler];
+  const bowlerStreakCount = bowlerStreak && bowlerStreak.delivery === bowlInput ? bowlerStreak.count : 0;
+
+  const res = resolveBallDelivery({
+    bat: batInput,
+    bowl: bowlInput,
+    strikerName: striker,
+    bowlerName: bowler,
+    batterOvr: getPlayerOvr(inn.battingSide === "host" ? s.hostTeamId : s.awayTeamId, striker),
+    bowlerOvr: getPlayerOvr(inn.battingSide === "host" ? s.awayTeamId : s.hostTeamId, bowler),
+    bowlerStreakCount,
+    captainSelectedZones: inn.fieldingPositions as any,
+    randomOverrides,
+  });
+
+  // Track streak per bowler
+  const streak = { ...(inn.bowlerStreak ?? {}) };
+  streak[bowler] = { delivery: bowlInput, count: res.newStreakCount };
+  inn.bowlerStreak = streak;
 
   // Stats
   const bs = { ...(inn.batStats[striker] ?? newBatStats()) };
-  bs.balls += 1;
-  if (outcome.out) {
+  if (res.isLegalBall) {
+    bs.balls += 1;
+  }
+  if (res.isWicket) {
     bs.out = true;
-    bs.outBy = bowler;
+    bs.outBy = res.dismissalFielder
+      ? `${res.dismissalType} ${res.dismissalFielder} b ${bowler}`
+      : `${res.dismissalType} b ${bowler}`;
   } else {
-    bs.runs += outcome.runs;
-    if (outcome.runs === 0) bs.dots += 1;
-    if (outcome.isSquare) {
-      const k = SQUARE_KEY(outcome.runs);
+    bs.runs += res.runs;
+    if (res.runs === 0 && res.isLegalBall) bs.dots += 1;
+    if (res.isBoundary) {
+      const k = SQUARE_KEY(res.runs);
       if (k) (bs as any)[k] = ((bs as any)[k] ?? 0) + 1;
     }
   }
   inn.batStats[striker] = bs;
 
   const bws = { ...(inn.bowlStats[bowler] ?? newBowlStats()) };
-  bws.ballsBowled += 1;
-  bws.runsConceded += outcome.runs;
-  if (outcome.out) bws.wickets += 1;
-  if (outcome.isSquare) bws.squaresConcededThisOver += 1;
+  if (res.isLegalBall) {
+    bws.ballsBowled += 1;
+  }
+  bws.runsConceded += res.runs;
+  if (res.isWicket) bws.wickets += 1;
+  if (res.isBoundary) bws.squaresConcededThisOver += 1;
   inn.bowlStats[bowler] = bws;
 
   // batter zero tally
-  if (batInput === 0 && !outcome.out) {
+  if (batInput === 0 && !res.isWicket) {
     inn.zeroCount[striker] = batterZerosUsed + 1;
   }
 
   // ball log
-  const ballNo = inn.ballInOver + 1;
+  const ballNo = inn.ballInOver + (res.isLegalBall ? 1 : 0);
   const log: BallLog = {
     innings: innIdx,
     over: inn.overNumber + 1,
-    ball: ballNo,
+    ball: Math.max(1, ballNo),
     phase,
     bat: batInput,
     bowl: bowlInput,
-    runs: outcome.runs,
-    isSquare: outcome.isSquare,
-    isWicket: outcome.out,
+    runs: res.runs,
+    isSquare: res.isBoundary,
+    isWicket: res.isWicket,
     striker,
     nonStriker: inn.nonStriker,
     bowler,
+    shotName: res.shotName,
+    deliveryName: res.deliveryName,
+    compatibility: res.compatibility.code,
+    hasStar: res.compatibility.hasStar,
+    battingExecution: res.battingExecution,
+    bowlingExecution: res.bowlingExecution,
+    contactQuality: res.contactQuality,
+    trajectory: res.trajectory,
+    dismissalType: res.dismissalType,
+    dismissalFielder: res.dismissalFielder,
+    lbwReview: res.lbwReview,
+    isLegalBall: res.isLegalBall,
+    isExtra: res.isExtra,
+    extraType: res.extraType,
   };
   inn.balls.push(log);
 
   // update score
-  inn.runs += outcome.runs;
-  inn.ballsBowled += 1;
+  inn.runs += res.runs;
+  if (res.isLegalBall) {
+    inn.ballsBowled += 1;
+  }
 
   let nextPhaseGame: GameState["phase"] = "playing";
   let pendingSelect: GameState["pendingSelect"];
 
   // wicket handling
-  if (outcome.out) {
+  if (res.isWicket) {
     inn.wickets += 1;
     inn.outBatters.push(striker);
     // 5 wickets max
@@ -317,58 +365,57 @@ export function resolveBall(s: GameState): GameState {
     }
   } else {
     // strike rotation: not in LMS, odd runs swap
-    if (!inn.isLMS && outcome.runs % 2 === 1) {
+    if (!inn.isLMS && res.runs % 2 === 1) {
       const tmp = inn.striker;
       inn.striker = inn.nonStriker;
       inn.nonStriker = tmp;
     }
   }
 
-  // end of over?
-  let endOfOver = false;
-  if (inn.ballInOver + 1 >= 6) {
-    endOfOver = true;
-    // maiden: CRAZY over with 0 squares conceded
-    if (phase === "CRAZY" && bws.squaresConcededThisOver === 0) {
-      inn.bowlStats[bowler].maidens += 1;
-    }
-    inn.overNumber += 1;
-    inn.ballInOver = 0;
-    inn.zeroCount = {};
-    inn.prevBowler = bowler;
-    inn.bowler = null;
-    // swap strike at end of over (unless LMS)
-    if (!inn.isLMS && inn.striker && inn.nonStriker) {
-      const tmp = inn.striker;
-      inn.striker = inn.nonStriker;
-      inn.nonStriker = tmp;
-    }
-    // overs limit reached — innings closes
-    if (inn.overNumber >= OVERS_PER_INNINGS) {
-      inn.closed = true;
-    }
-    if (!inn.closed) {
-      // If wicket fell on this last ball, striker is null and non-striker is the survivor.
-      // Promote the survivor to striker and request the new batter for the non-striker end first,
-      // then bowler selection will be chained inside setNewBatter.
-      if (!inn.isLMS && inn.striker === null && inn.nonStriker) {
-        inn.striker = inn.nonStriker;
-        inn.nonStriker = null;
-        pendingSelect = { type: "batter", forSide: battingSide, toNonStriker: true };
-        nextPhaseGame = "select_new_batter";
-      } else {
-        pendingSelect = { type: "bowler", forSide: bowlingSideForCurrent({ ...s, innings: replaceInn(s, innIdx, inn) })! };
-        nextPhaseGame = "select_bowler";
+  // end of over? (only legal balls advance over)
+  if (res.isLegalBall) {
+    if (inn.ballInOver + 1 >= 6) {
+      // maiden: CRAZY over with 0 boundaries conceded
+      if (phase === "CRAZY" && bws.squaresConcededThisOver === 0) {
+        inn.bowlStats[bowler].maidens += 1;
       }
+      inn.overNumber += 1;
+      inn.ballInOver = 0;
+      inn.zeroCount = {};
+      inn.prevBowler = bowler;
+      inn.bowler = null;
+      // swap strike at end of over (unless LMS)
+      if (!inn.isLMS && inn.striker && inn.nonStriker) {
+        const tmp = inn.striker;
+        inn.striker = inn.nonStriker;
+        inn.nonStriker = tmp;
+      }
+      // overs limit reached — innings closes
+      if (inn.overNumber >= OVERS_PER_INNINGS) {
+        inn.closed = true;
+      }
+      if (!inn.closed) {
+        // If wicket fell on this last ball, striker is null and non-striker is the survivor.
+        // Promote the survivor to striker and request the new batter for the non-striker end first,
+        // then bowler selection will be chained inside setNewBatter.
+        if (!inn.isLMS && inn.striker === null && inn.nonStriker) {
+          inn.striker = inn.nonStriker;
+          inn.nonStriker = null;
+          pendingSelect = { type: "batter", forSide: battingSide, toNonStriker: true };
+          nextPhaseGame = "select_new_batter";
+        } else {
+          pendingSelect = { type: "bowler", forSide: bowlingSideForCurrent({ ...s, innings: replaceInn(s, innIdx, inn) })! };
+          nextPhaseGame = "select_bowler";
+        }
+      }
+    } else {
+      inn.ballInOver += 1;
     }
-  } else {
-    inn.ballInOver += 1;
   }
 
   // chase target check for 2nd/4th innings
   let result: string | undefined;
   let winner: GameState["winner"];
-  const innings = replaceInn(s, innIdx, inn);
 
   // For 4th innings — chase win
   if (innIdx === 4) {
@@ -385,7 +432,6 @@ export function resolveBall(s: GameState): GameState {
   if (inn.closed) {
     return endOfInnings({ ...s, innings: replaceInn(s, innIdx, inn), lastBall: log }, result, winner);
   }
-
 
   return {
     ...s,
