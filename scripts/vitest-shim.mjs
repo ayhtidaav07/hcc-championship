@@ -52,5 +52,18 @@ export function expect(actual) {
     toBeFalsy() {
       assert.ok(!actual);
     },
+    toBeDefined() {
+      assert.notStrictEqual(actual, undefined);
+    },
+    toBeUndefined() {
+      assert.strictEqual(actual, undefined);
+    },
+    toContain(item) {
+      if (Array.isArray(actual) || typeof actual === "string") {
+        assert.ok(actual.includes(item), `Expected ${JSON.stringify(actual)} to contain ${JSON.stringify(item)}`);
+      } else {
+        assert.ok(item in actual, `Expected key ${item} in object`);
+      }
+    },
   };
 }

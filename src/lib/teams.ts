@@ -202,7 +202,8 @@ export const isPracticeTeam = (id: string | null | undefined) => !!id && id.star
 
 export const getTeam = (id: string): Team | undefined =>
   TEAMS.find((t) => t.id === id) ?? PRACTICE_TEAMS.find((t) => t.id === id);
-export const getEligibleBatters = (t: Team): Player[] => t.players.slice(0, 5);
+export const getEligibleBatters = (t: Team | undefined): Player[] =>
+  (t?.players ? t.players : PRACTICE_TEAMS[0].players).slice(0, 5);
 // Only all-rounders and pure bowlers can bowl. Pure batters (Bat) and wicket-keepers (WK) cannot.
-export const getEligibleBowlers = (t: Team): Player[] =>
-  t.players.filter((p) => p.role !== "Bat" && p.role !== "WK");
+export const getEligibleBowlers = (t: Team | undefined): Player[] =>
+  (t?.players ? t.players : PRACTICE_TEAMS[0].players).filter((p) => p.role !== "Bat" && p.role !== "WK");

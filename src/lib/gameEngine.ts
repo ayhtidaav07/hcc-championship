@@ -13,9 +13,9 @@ import {
   newBatStats,
   newBowlStats,
 } from "./gameTypes";
-import { TEAMS, getTeam, getEligibleBatters } from "./teams";
+import { TEAMS, getTeam, getEligibleBatters, PRACTICE_TEAMS } from "./teams";
 import { resolveBallDelivery, type BallResolutionResult, type BallResolutionInput } from "./engine/resolution";
-import { DELIVERIES, SHOTS, getCompatibility } from "./engine/constants";
+import { DELIVERIES, SHOTS, getCompatibility, DEFAULT_CAPTAIN_FIELD_POSITIONS } from "./engine/constants";
 import { buildFieldingSetup, type FieldingSetup } from "./engine/fielding";
 
 export const OVERS_PER_INNINGS = 15;
@@ -53,7 +53,8 @@ export function createInitialState(roomCode: string): GameState {
 }
 
 export function teamForSide(s: GameState, side: Side) {
-  return side === "host" ? getTeam(s.hostTeamId!) : getTeam(s.awayTeamId!);
+  const id = side === "host" ? s.hostTeamId : s.awayTeamId;
+  return (id ? getTeam(id) : undefined) ?? (side === "host" ? PRACTICE_TEAMS[0] : PRACTICE_TEAMS[1]);
 }
 
 export function battingSideOfInnings(inn: InningsState): Side {
@@ -90,6 +91,7 @@ export function startInnings(s: GameState, inningsNo: 1 | 2 | 3 | 4, battingSide
     balls: [],
     outBatters: [],
     yetToBat: eligible.slice(),
+    fieldingPositions: [...DEFAULT_CAPTAIN_FIELD_POSITIONS],
   };
   const innings = [...s.innings];
   innings[inningsNo] = inn;
@@ -211,6 +213,15 @@ export function lockInput(s: GameState, side: Side, value: number): GameState {
     if (s.awayLocked) return s;
     return { ...s, awayInput: value, awayLocked: true, lastActionAt: Date.now() };
   }
+}
+
+export function repositionField(s: GameState, positions: string[]): GameState {
+  const innIdx = s.currentInnings;
+  if (!s.innings[innIdx]) return s;
+  const inn = { ...s.innings[innIdx]!, fieldingPositions: positions };
+  const innings = [...s.innings];
+  innings[innIdx] = inn;
+  return { ...s, innings, lastActionAt: Date.now() };
 }
 
 // Compute ball outcome from bat/bowl values using the central engine.

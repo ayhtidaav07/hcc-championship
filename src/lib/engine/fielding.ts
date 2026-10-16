@@ -86,6 +86,22 @@ export function buildFieldingSetup(
   };
 }
 
+export const ZONE_EQUIVALENTS: Record<string, string[]> = {
+  third_man: ["third_man", "deep_third_man"],
+  deep_third_man: ["third_man", "deep_third_man"],
+  midwicket: ["midwicket", "short_midwicket"],
+  short_midwicket: ["midwicket", "short_midwicket"],
+  deep_square_leg: ["deep_square_leg", "deep_midwicket"],
+  deep_midwicket: ["deep_square_leg", "deep_midwicket"],
+};
+
+export function zonesOverlap(zoneA: string, zoneB: string): boolean {
+  if (zoneA === zoneB) return true;
+  const eqA = ZONE_EQUIVALENTS[zoneA];
+  if (eqA && eqA.includes(zoneB)) return true;
+  return false;
+}
+
 // Check coverage of target zones by active 6 fielders
 export function resolveInterception(
   setup: FieldingSetup,
@@ -117,7 +133,10 @@ export function resolveInterception(
   }
 
   // General ground/aerial interception in target zones
-  const matching = activeFielders.filter((f) => targetZones.includes(f.zone));
+  const matching = activeFielders.filter((f) =>
+    targetZones.some((tz) => zonesOverlap(tz, f.zone))
+  );
+
   if (matching.length === 0) {
     return {
       covered: false,

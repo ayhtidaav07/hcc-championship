@@ -15,7 +15,9 @@ type RoomEventBase =
   | { type: "leave"; side: "host" | "away" }
   | { type: "pause" }
   | { type: "resume" }
-  | { type: "ping" };
+  | { type: "ping" }
+  | { type: "reposition_field"; positions: string[] }
+  | { type: "review_choice"; side: "host" | "away"; choice: 1 | 2 };
 
 export type RoomEvent = RoomEventBase & { _from?: string };
 
